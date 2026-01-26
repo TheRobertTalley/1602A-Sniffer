@@ -65,6 +65,19 @@ If you want strict correctness across radiation types, keep everything in Sv uni
 Suggested repo topics:
 1602a, hd44780, lcd, sniffer, reverseengineering, geigercounter, radiation, doserate, esp32, meshtastic, fallout, pipboy, retrocomputing, iot
 
+## Repo layout
+
+- `arduino/1602A_Sniffer/` – Arduino Uno sketch that listens to the HD44780 bus and prints mirrored LCD lines plus derived metrics.
+- `docs/` – Wiring and serial-output examples you can read before wiring up the counter.
+- `PlatformIO` scaffolding (`platformio.ini`, `src/main.cpp`, `include/`, `lib/`, `test/`) provides a convenient home for future embedded experimentation beyond the Arduino sketch.
+
+## Building locally
+
+1. Open `arduino/1602A_Sniffer/1602A_Sniffer.ino` in the Arduino IDE or import it into PlatformIO.
+2. Select `Arduino Uno` (ATmega328P, 16 MHz) and a 115200 baud serial monitor.
+3. Connect the Uno to the Geiger counter per `docs/WIRING.md`, power the counter normally, tie the grounds, and upload the sketch.
+4. Watch the serial stream mirror the display and report metrics; the sketch is entirely passive so no LCD is connected.
+
 ## License
 
 MIT
