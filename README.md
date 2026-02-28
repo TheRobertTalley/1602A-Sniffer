@@ -31,14 +31,37 @@ Why this exists:
 
 ## Hardware
 
-This sketch is written for Arduino Uno as a safe first step with 5V logic.
+This project now supports two practical wiring targets:
+
+- Arduino Uno as the original 5V reference build
+- Arduino Micro as the working PlatformIO port used for the traced Geiger harness
 
 Connections are documented in:
 docs/WIRING.md
 
+Working Arduino Micro mapping used by the current PlatformIO firmware:
+
+- RS -> D2
+- RW -> D4
+- E -> D12
+- D0 -> D11
+- D1 -> D10
+- D2 -> D9
+- D3 -> D8
+- D4 -> D7
+- D5 -> D6
+- D6 -> D5
+- D7 -> D3
+
+Notes:
+
+- This matches the traced harness where the Arduino-side D3 and D4 wires are swapped.
+- On this Micro wiring, the byte bus is captured directly and the firmware infers command vs data from the HD44780 byte stream, because the traced control-line levels are not as clean as the byte data.
+
 ## Output
 
 Example lines:
+- LCD|R:00.16 usv/h  1|A:00.18 usv/h  o|
 - rate_usvph=0.16 avg_usvph=0.18 ema1m_usvph=0.15 ema10m_usvph=0.12 peak_usvph=0.26 dose_uSv=0.004 rate_radph=0.00001600 rate_rads=0.0000000044 dose_rad=0.00000040 alarm=OK
 
 More examples in:
@@ -67,16 +90,16 @@ Suggested repo topics:
 
 ## Repo layout
 
-- `arduino/1602A_Sniffer/` – Arduino Uno sketch that listens to the HD44780 bus and prints mirrored LCD lines plus derived metrics.
+- `arduino/1602A_Sniffer/` – Arduino Uno sketch for the original reference wiring.
 - `docs/` – Wiring and serial-output examples you can read before wiring up the counter.
-- `PlatformIO` scaffolding (`platformio.ini`, `src/main.cpp`, `include/`, `lib/`, `test/`) provides a convenient home for future embedded experimentation beyond the Arduino sketch.
+- `PlatformIO` scaffolding (`platformio.ini`, `src/main.cpp`, `include/`, `lib/`, `test/`) now includes the working Arduino Micro implementation.
 
 ## Building locally
 
-1. Open `arduino/1602A_Sniffer/1602A_Sniffer.ino` in the Arduino IDE or import it into PlatformIO.
-2. Select `Arduino Uno` (ATmega328P, 16 MHz) and a 115200 baud serial monitor.
-3. Connect the Uno to the Geiger counter per `docs/WIRING.md`, power the counter normally, tie the grounds, and upload the sketch.
-4. Watch the serial stream mirror the display and report metrics; the sketch is entirely passive so no LCD is connected.
+1. For the original Uno path, open `arduino/1602A_Sniffer/1602A_Sniffer.ino` in the Arduino IDE and wire the board per `docs/WIRING.md`.
+2. For the working Micro path, open the repo in PlatformIO and build the default `micro` environment.
+3. If your upload port is not auto-detected, pass it explicitly, for example `pio run -e micro -t upload --upload-port COM20`.
+4. Open a 115200 baud monitor and watch the serial stream mirror the display and report metrics; the sniffer is passive so no LCD is connected.
 
 ## License
 
