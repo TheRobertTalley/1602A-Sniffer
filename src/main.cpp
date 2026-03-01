@@ -1,6 +1,12 @@
 #include <Arduino.h>
 
+#if defined(ARDUINO_AVR_MICRO) && !defined(SERVO_SWEEP_TEST_MODE) && \
+    !defined(KEYPAD_CALIBRATION_MODE)
+#include <Keyboard.h>
+#endif
+
 #if defined(ARDUINO_AVR_MICRO)
+#include <Servo.h>
 // Arduino Micro wiring traced by the user:
 // E = D12
 // D0 = D11, D1 = D10, D2 = D9, D3 = D8, D4 = D7, D5 = D6, D6 = D5
@@ -17,6 +23,8 @@ static const uint8_t PIN_D4 = 7;
 static const uint8_t PIN_D5 = 6;
 static const uint8_t PIN_D6 = 5;
 static const uint8_t PIN_D7 = 3;
+static const uint8_t PIN_SERVO = A0;
+static const uint8_t PIN_KEYPAD = A1;
 #else
 // Original Uno wiring.
 static const uint8_t PIN_E = 2;
@@ -54,6 +62,18 @@ volatile uint16_t rbTail = 0;
 static bool usePolledE = false;
 #if defined(ARDUINO_AVR_MICRO)
 static uint8_t microLastPortD = 0;
+static Servo gaugeServo;
+static bool gaugeServoAttached = false;
+enum KeypadButton : uint8_t {
+  KEYPAD_BUTTON_NONE = 0,
+  KEYPAD_BUTTON_A,
+  KEYPAD_BUTTON_B,
+  KEYPAD_BUTTON_C,
+  KEYPAD_BUTTON_AB,
+  KEYPAD_BUTTON_AC,
+  KEYPAD_BUTTON_BC,
+  KEYPAD_BUTTON_ABC,
+};
 #else
 static uint8_t lastEState = 0;
 #endif
@@ -345,6 +365,363 @@ static inline float clampf(float x, float lo, float hi) {
   return x;
 }
 
+#if defined(ARDUINO_AVR_MICRO)
+static const uint8_t SERVO_MIN_ANGLE = 15;
+static const uint8_t SERVO_CENTER_ANGLE = 90;
+static const uint8_t SERVO_MAX_ANGLE = 165;
+static const uint8_t SERVO_RAW_ZERO = 0;
+static const uint8_t SERVO_RAW_HALF = 128;
+static const uint8_t SERVO_RAW_FULL = 255;
+static const float SERVO_FULL_SCALE_USVPH = 1.0f;
+
+static uint8_t gaugeAngleForUsvph(float usvph) {
+  const float clamped = clampf(usvph, 0.0f, SERVO_FULL_SCALE_USVPH);
+  const float t = clamped / SERVO_FULL_SCALE_USVPH;
+  const float span = static_cast<float>(SERVO_MAX_ANGLE - SERVO_MIN_ANGLE);
+  return static_cast<uint8_t>((static_cast<float>(SERVO_MIN_ANGLE) + (t * span)) + 0.5f);
+}
+
+static void writeGaugeServoAngle(uint8_t angle) {
+  if (!gaugeServoAttached) {
+    return;
+  }
+  gaugeServo.write(angle);
+}
+
+static uint8_t gaugeAngleForRaw(uint8_t rawValue) {
+  const uint16_t span = static_cast<uint16_t>(SERVO_MAX_ANGLE - SERVO_MIN_ANGLE);
+  return static_cast<uint8_t>(SERVO_MIN_ANGLE +
+                              ((static_cast<uint16_t>(rawValue) * span + 127U) / 255U));
+}
+
+static void sweepGaugeServoRaw(uint8_t startRaw,
+                               uint8_t endRaw,
+                               uint8_t stepSize,
+                               uint16_t stepDelayMs) {
+  if (!gaugeServoAttached || stepSize == 0) {
+    return;
+  }
+
+  int16_t rawValue = startRaw;
+  const int16_t end = endRaw;
+  const int16_t step = (startRaw <= endRaw) ? stepSize : -static_cast<int16_t>(stepSize);
+
+  while ((step > 0 && rawValue <= end) || (step < 0 && rawValue >= end)) {
+    writeGaugeServoAngle(gaugeAngleForRaw(static_cast<uint8_t>(rawValue)));
+    delay(stepDelayMs);
+    rawValue += step;
+  }
+
+  writeGaugeServoAngle(gaugeAngleForRaw(endRaw));
+}
+
+static void runGaugeServoStartupSweep() {
+  if (!gaugeServoAttached) {
+    return;
+  }
+
+  // Zero the gauge first.
+  writeGaugeServoAngle(gaugeAngleForRaw(SERVO_RAW_ZERO));
+  delay(180);
+
+  // Fast to full.
+  sweepGaugeServoRaw(SERVO_RAW_ZERO, SERVO_RAW_FULL, 32, 6);
+  delay(90);
+
+  // Fast back to zero.
+  sweepGaugeServoRaw(SERVO_RAW_FULL, SERVO_RAW_ZERO, 32, 6);
+  delay(90);
+
+  // Slow to full.
+  sweepGaugeServoRaw(SERVO_RAW_ZERO, SERVO_RAW_FULL, 4, 18);
+  delay(90);
+
+  // Fast back to zero.
+  sweepGaugeServoRaw(SERVO_RAW_FULL, SERVO_RAW_ZERO, 32, 6);
+  delay(90);
+
+  // Fast to halfway.
+  sweepGaugeServoRaw(SERVO_RAW_ZERO, SERVO_RAW_HALF, 24, 6);
+  delay(90);
+
+  // Slow back to zero before normal gauge mode takes over.
+  sweepGaugeServoRaw(SERVO_RAW_HALF, SERVO_RAW_ZERO, 4, 18);
+  delay(120);
+}
+
+static void updateGaugeServo(float usvph) {
+  writeGaugeServoAngle(gaugeAngleForUsvph(usvph));
+}
+
+#if !defined(SERVO_SWEEP_TEST_MODE)
+#if defined(KEYPAD_CALIBRATION_MODE)
+static const char *keypadButtonName(KeypadButton button) {
+  switch (button) {
+    case KEYPAD_BUTTON_A:
+      return "A";
+    case KEYPAD_BUTTON_B:
+      return "B";
+    case KEYPAD_BUTTON_C:
+      return "C";
+    case KEYPAD_BUTTON_AB:
+      return "AB";
+    case KEYPAD_BUTTON_AC:
+      return "AC";
+    case KEYPAD_BUTTON_BC:
+      return "BC";
+    case KEYPAD_BUTTON_ABC:
+      return "ABC";
+    case KEYPAD_BUTTON_NONE:
+    default:
+      return "NONE";
+  }
+}
+#endif
+
+static uint16_t readKeypadAdc() {
+  uint16_t sum = 0;
+  for (uint8_t i = 0; i < 4; i++) {
+    sum += static_cast<uint16_t>(analogRead(PIN_KEYPAD));
+  }
+  return static_cast<uint16_t>((sum + 2U) / 4U);
+}
+
+static KeypadButton decodeKeypadButton(uint16_t adc) {
+  // Measured 10-bit ADC centers for the A1 ladder with a 10k pull-up to VCC.
+  static const uint16_t expectedABC = 375;
+  static const uint16_t expectedAB = 412;
+  static const uint16_t expectedAC = 456;
+  static const uint16_t expectedA = 512;
+  static const uint16_t expectedBC = 590;
+  static const uint16_t expectedB = 688;
+  static const uint16_t expectedC = 821;
+  static const uint16_t maxError = 20;
+
+  if (adc > 980) {
+    return KEYPAD_BUTTON_NONE;
+  }
+
+  uint16_t bestError = 1023;
+  KeypadButton bestButton = KEYPAD_BUTTON_NONE;
+
+  const uint16_t abcError =
+      static_cast<uint16_t>(abs(static_cast<int>(adc) - static_cast<int>(expectedABC)));
+  if (abcError < bestError) {
+    bestError = abcError;
+    bestButton = KEYPAD_BUTTON_ABC;
+  }
+
+  const uint16_t abError =
+      static_cast<uint16_t>(abs(static_cast<int>(adc) - static_cast<int>(expectedAB)));
+  if (abError < bestError) {
+    bestError = abError;
+    bestButton = KEYPAD_BUTTON_AB;
+  }
+
+  const uint16_t acError =
+      static_cast<uint16_t>(abs(static_cast<int>(adc) - static_cast<int>(expectedAC)));
+  if (acError < bestError) {
+    bestError = acError;
+    bestButton = KEYPAD_BUTTON_AC;
+  }
+
+  const uint16_t aError =
+      static_cast<uint16_t>(abs(static_cast<int>(adc) - static_cast<int>(expectedA)));
+  if (aError < bestError) {
+    bestError = aError;
+    bestButton = KEYPAD_BUTTON_A;
+  }
+
+  const uint16_t bcError =
+      static_cast<uint16_t>(abs(static_cast<int>(adc) - static_cast<int>(expectedBC)));
+  if (bcError < bestError) {
+    bestError = bcError;
+    bestButton = KEYPAD_BUTTON_BC;
+  }
+
+  const uint16_t bError =
+      static_cast<uint16_t>(abs(static_cast<int>(adc) - static_cast<int>(expectedB)));
+  if (bError < bestError) {
+    bestError = bError;
+    bestButton = KEYPAD_BUTTON_B;
+  }
+
+  const uint16_t cError =
+      static_cast<uint16_t>(abs(static_cast<int>(adc) - static_cast<int>(expectedC)));
+  if (cError < bestError) {
+    bestError = cError;
+    bestButton = KEYPAD_BUTTON_C;
+  }
+
+  return (bestError <= maxError) ? bestButton : KEYPAD_BUTTON_NONE;
+}
+
+#if !defined(KEYPAD_CALIBRATION_MODE)
+static void sendKeypadKey(KeypadButton button) {
+  switch (button) {
+    case KEYPAD_BUTTON_A:
+      Keyboard.write('a');
+      break;
+
+    case KEYPAD_BUTTON_B:
+      Keyboard.write('b');
+      break;
+
+    case KEYPAD_BUTTON_C:
+      Keyboard.write('c');
+      break;
+
+    case KEYPAD_BUTTON_AB:
+      Keyboard.write('a');
+      Keyboard.write('b');
+      break;
+
+    case KEYPAD_BUTTON_AC:
+      Keyboard.write('a');
+      Keyboard.write('c');
+      break;
+
+    case KEYPAD_BUTTON_BC:
+      Keyboard.write('b');
+      Keyboard.write('c');
+      break;
+
+    case KEYPAD_BUTTON_ABC:
+      Keyboard.write('a');
+      Keyboard.write('b');
+      Keyboard.write('c');
+      break;
+
+    case KEYPAD_BUTTON_NONE:
+    default:
+      break;
+  }
+}
+#endif
+
+#if defined(KEYPAD_CALIBRATION_MODE)
+static void handleKeypadCalibration() {
+  static KeypadButton pendingButton = KEYPAD_BUTTON_NONE;
+  static KeypadButton stableButton = KEYPAD_BUTTON_NONE;
+  static uint32_t pendingSinceMs = 0;
+  static uint32_t lastHoldReportMs = 0;
+  static uint32_t lastIdleReportMs = 0;
+  static uint16_t holdMinAdc = 1023;
+  static uint16_t holdMaxAdc = 0;
+
+  const uint16_t adc = readKeypadAdc();
+  const KeypadButton rawButton = decodeKeypadButton(adc);
+  const uint32_t nowMs = millis();
+
+  if (rawButton != pendingButton) {
+    pendingButton = rawButton;
+    pendingSinceMs = nowMs;
+    return;
+  }
+
+  if (rawButton != stableButton && (nowMs - pendingSinceMs) >= 30) {
+    if (stableButton != KEYPAD_BUTTON_NONE) {
+      Serial.print("KEYPAD release button=");
+      Serial.print(keypadButtonName(stableButton));
+      Serial.print(" min=");
+      Serial.print(holdMinAdc);
+      Serial.print(" max=");
+      Serial.println(holdMaxAdc);
+    }
+
+    stableButton = rawButton;
+    lastHoldReportMs = nowMs;
+    holdMinAdc = adc;
+    holdMaxAdc = adc;
+
+    Serial.print("KEYPAD stable button=");
+    Serial.print(keypadButtonName(stableButton));
+    Serial.print(" adc=");
+    Serial.println(adc);
+    return;
+  }
+
+  if (rawButton != stableButton) {
+    return;
+  }
+
+  if (stableButton == KEYPAD_BUTTON_NONE) {
+    if ((nowMs - lastIdleReportMs) >= 1000) {
+      lastIdleReportMs = nowMs;
+      Serial.print("KEYPAD idle adc=");
+      Serial.println(adc);
+    }
+    return;
+  }
+
+  if (adc < holdMinAdc) {
+    holdMinAdc = adc;
+  }
+  if (adc > holdMaxAdc) {
+    holdMaxAdc = adc;
+  }
+
+  if ((nowMs - lastHoldReportMs) >= 250) {
+    lastHoldReportMs = nowMs;
+    Serial.print("KEYPAD hold button=");
+    Serial.print(keypadButtonName(stableButton));
+    Serial.print(" adc=");
+    Serial.print(adc);
+    Serial.print(" min=");
+    Serial.print(holdMinAdc);
+    Serial.print(" max=");
+    Serial.println(holdMaxAdc);
+  }
+}
+#else
+static void handleKeypadButtons() {
+  static KeypadButton pendingButton = KEYPAD_BUTTON_NONE;
+  static KeypadButton stableButton = KEYPAD_BUTTON_NONE;
+  static uint32_t pendingSinceMs = 0;
+
+  const KeypadButton rawButton = decodeKeypadButton(readKeypadAdc());
+  const uint32_t nowMs = millis();
+
+  if (rawButton != pendingButton) {
+    pendingButton = rawButton;
+    pendingSinceMs = nowMs;
+    return;
+  }
+
+  if (rawButton == stableButton || (nowMs - pendingSinceMs) < 30) {
+    return;
+  }
+
+  stableButton = rawButton;
+  if (stableButton != KEYPAD_BUTTON_NONE) {
+    sendKeypadKey(stableButton);
+  }
+}
+#endif
+#endif
+
+#if defined(SERVO_SWEEP_TEST_MODE)
+static void runContinuousServoSweepTest() {
+  static uint8_t angle = SERVO_MIN_ANGLE;
+  static int8_t step = 2;
+
+  writeGaugeServoAngle(angle);
+  delay(20);
+
+  const int16_t next = static_cast<int16_t>(angle) + step;
+  if (next >= SERVO_MAX_ANGLE) {
+    angle = SERVO_MAX_ANGLE;
+    step = -2;
+  } else if (next <= SERVO_MIN_ANGLE) {
+    angle = SERVO_MIN_ANGLE;
+    step = 2;
+  } else {
+    angle = static_cast<uint8_t>(next);
+  }
+}
+#endif
+#endif
+
 static void updateEma(float &ema, float x, float dt_s, float tau_s) {
   float alpha = dt_s / (tau_s + dt_s);
   alpha = clampf(alpha, 0.0f, 1.0f);
@@ -386,6 +763,10 @@ static void printMetrics(float rate_usvph, bool haveRate, float avg_usvph, bool 
     updateEma(ema1m_usvph, x_usvph, dt_s, TAU_EMA_1M_S);
     updateEma(ema10m_usvph, x_usvph, dt_s, TAU_EMA_10M_S);
   }
+
+#if defined(ARDUINO_AVR_MICRO)
+  updateGaugeServo(ema1m_usvph);
+#endif
 
   if (haveRate && rate_usvph > peak_usvph) {
     peak_usvph = rate_usvph;
@@ -490,7 +871,34 @@ static void printMetrics(float rate_usvph, bool haveRate, float avg_usvph, bool 
 }
 
 void setup() {
+#if defined(ARDUINO_AVR_MICRO) && defined(SERVO_SWEEP_TEST_MODE)
+  gaugeServo.attach(PIN_SERVO);
+  gaugeServoAttached = true;
+  writeGaugeServoAngle(SERVO_CENTER_ANGLE);
+  delay(300);
+  return;
+#endif
+
   Serial.begin(115200);
+
+#if defined(ARDUINO_AVR_MICRO) && !defined(SERVO_SWEEP_TEST_MODE) && \
+    !defined(KEYPAD_CALIBRATION_MODE)
+  gaugeServo.attach(PIN_SERVO);
+  gaugeServoAttached = true;
+  runGaugeServoStartupSweep();
+  pinMode(PIN_KEYPAD, INPUT);
+  Keyboard.begin();
+#elif defined(ARDUINO_AVR_MICRO) && defined(KEYPAD_CALIBRATION_MODE)
+  gaugeServo.attach(PIN_SERVO);
+  gaugeServoAttached = true;
+  runGaugeServoStartupSweep();
+  pinMode(PIN_KEYPAD, INPUT);
+  Serial.println("KEYPAD CAL mode: press A/B/C and combos on A1.");
+#elif defined(ARDUINO_AVR_MICRO)
+  gaugeServo.attach(PIN_SERVO);
+  gaugeServoAttached = true;
+  runGaugeServoStartupSweep();
+#endif
 
 #if defined(USBCON)
   const uint32_t usbWaitStartMs = millis();
@@ -532,6 +940,17 @@ void setup() {
 }
 
 void loop() {
+#if defined(ARDUINO_AVR_MICRO) && defined(SERVO_SWEEP_TEST_MODE)
+  runContinuousServoSweepTest();
+  return;
+#endif
+
+#if defined(ARDUINO_AVR_MICRO) && defined(KEYPAD_CALIBRATION_MODE)
+  handleKeypadCalibration();
+#elif defined(ARDUINO_AVR_MICRO) && !defined(SERVO_SWEEP_TEST_MODE)
+  handleKeypadButtons();
+#endif
+
   static uint32_t lastBusMs = 0;
   static uint32_t lastCaptureMs = 0;
 
